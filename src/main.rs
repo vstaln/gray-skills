@@ -499,7 +499,13 @@ fn tool_search(args: &Value) -> Result<String, String> {
     } else if notes.is_empty() {
         out.push_str("no hits — try broader terms or source: \"npm\"|\"github\"|\"cli\"");
     }
-    out.truncate(MAX_OUT);
+    if out.len() > MAX_OUT {
+        let mut end = MAX_OUT;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+    }
     Ok(out)
 }
 
@@ -760,7 +766,13 @@ fn tool_install(args: &Value) -> Result<String, String> {
     let lines = report?;
     let mut out = format!("installed {} skill(s):\n", lines.len());
     out.push_str(&lines.join("\n"));
-    out.truncate(MAX_OUT);
+    if out.len() > MAX_OUT {
+        let mut end = MAX_OUT;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+    }
     Ok(out)
 }
 
