@@ -73,9 +73,40 @@ fn manifest() -> Value {
                 }
             }
         ],
-        "commands": ["/skills", "/skill"],
-        "completion": ["list", "search", "install", "remove", "on", "off", "enable", "disable"],
+        "commands": ["/skills"],
+        "completion": VERBS,
     })
+}
+
+const VERBS: [&str; 8] = [
+    "list", "search", "install", "remove", "on", "off", "enable", "disable",
+];
+
+/// `/skills <name>` completions: gray reads `plugins/skills-completion.json`
+/// and refreshes its popup when the file changes. Rewritten only on change.
+fn publish_completion(skills: &[catalog::Skill]) {
+    let mut entries: Vec<Value> = VERBS.iter().map(|v| json!(v)).collect();
+    for skill in skills {
+        let mut desc: String = skill
+            .description
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if desc.chars().count() > 90 {
+            desc = desc.chars().take(89).collect::<String>() + "…";
+        }
+        entries.push(json!({ "arg": skill.name, "description": desc }));
+    }
+    let body = json!({ "completion": entries }).to_string();
+    let dir = gray_home().join("plugins");
+    let path = dir.join("skills-completion.json");
+    if std::fs::read_to_string(&path).is_ok_and(|old| old == body) {
+        return;
+    }
+    let tmp = dir.join(format!("skills-completion.json.{}", std::process::id()));
+    if std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&tmp, &body).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
 }
 
 /// Installed skills live in the shared gray skills dir ($GRAY_HOME/skills or
@@ -954,6 +985,7 @@ fn run_skill(skills: &[catalog::Skill], name: &str, args: &str) -> Value {
 /// verb's name (`on`, `list`, …) wins that word.
 fn run_command(argv: &[&str], cwd: &Path) -> Value {
     let skills = catalog::discover(cwd);
+    publish_completion(&skills);
     let text = |t: String| json!({ "text": t });
     let shadowed = argv.len() == 1 && skills.iter().any(|s| s.name == argv[0]);
     match argv {
@@ -994,7 +1026,10 @@ fn handle(req: &Value) -> (Option<Value>, bool) {
         return (None, method == "plugin/shutdown");
     };
     let result = match method {
-        "plugin/manifest" => manifest(),
+        "plugin/manifest" => {
+            publish_completion(&catalog::discover(&request_cwd(&params)));
+            manifest()
+        }
         "tool/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("args").cloned().unwrap_or(Value::Null);
@@ -1013,6 +1048,7 @@ fn handle(req: &Value) -> (Option<Value>, bool) {
         }
         "prompt/context" => {
             let skills = catalog::discover(&request_cwd(&params));
+            publish_completion(&skills);
             let block = catalog::listing(&skills, &catalog::State::load(), catalog::char_budget());
             json!({ "text": block.unwrap_or_default() })
         }
@@ -1063,7 +1099,7 @@ mod tests {
     fn manifest_has_tools_and_command() {
         let m = call("plugin/manifest", Value::Null)["result"].clone();
         assert_eq!(m["name"], "skills");
-        assert_eq!(m["commands"], json!(["/skills", "/skill"]));
+        assert_eq!(m["commands"], json!(["/skills"]));
         assert_eq!(m["hooks"], json!(["prompt/context"]));
         let tools: Vec<&str> = m["tools"]
             .as_array()
