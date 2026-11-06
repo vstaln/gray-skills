@@ -1,4 +1,8 @@
-//! gray-skills — skill hub browser/installer.
+//! gray-skills — everything gray knows about skills. Bare gray has none.
+//!
+//! Discovers skills across the agent harnesses, lists them to the model on
+//! every turn (`catalog`), loads them through the `skill` tool, and runs
+//! `/skills`. The hub half is below.
 //!
 //! Original design (not a port): `skills_search` probes real sources — the
 //! npm registry (`keywords:agent-skills` via `/-/v1/search`), GitHub
@@ -6,10 +10,12 @@
 //! the `skills` ecosystem CLI (`npx -y skills search`, 15s, silent degrade).
 //! `skills_install` fetches a skill pack — npm tarball, git sparse checkout,
 //! or a raw SKILL.md — into `~/.gray/skills/<name>/`, refusing packs whose
-//! SKILL.md has no frontmatter. `skills_list` / `/skills` show what's there.
+//! SKILL.md has no frontmatter.
 //!
 //! All network goes through curl/gh/git with 20s timeouts; npm pkgs resolve
 //! through the registry so `npm` itself isn't required to install.
+
+mod catalog;
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -28,7 +34,20 @@ fn manifest() -> Value {
         "name": "skills",
         "version": env!("CARGO_PKG_VERSION"),
         "protocol": "1.1",
+        "hooks": ["prompt/context"],
         "tools": [
+            {
+                "name": "skill",
+                "description": "Load a skill from the <available_skills> list and follow its instructions.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Skill name, exactly as listed." },
+                        "args": { "type": "string", "description": "Optional arguments for the skill." }
+                    },
+                    "required": ["name"]
+                }
+            },
             {
                 "name": "skills_search",
                 "description": "Search real skill sources for agent skills: npm packages tagged keywords:agent-skills, GitHub repos (topic:agent-skills) and SKILL.md files, and the skills.sh ecosystem CLI. Returns 'name [source] — description' rows; feed a row's name to skills_install.",
@@ -52,25 +71,24 @@ fn manifest() -> Value {
                     },
                     "required": ["source"]
                 }
-            },
-            {
-                "name": "skills_list",
-                "description": "List skills installed under ~/.gray/skills/ with their one-line descriptions.",
-                "parameters": { "type": "object", "properties": {} }
             }
         ],
-        "commands": ["/skills"],
+        "commands": ["/skills", "/skill"],
+        "completion": ["list", "search", "install", "remove", "on", "off", "enable", "disable"],
     })
 }
 
 /// Installed skills live in the shared gray skills dir ($GRAY_HOME/skills or
 /// ~/.gray/skills) — the explicit write target for this plugin.
 fn skills_dir() -> PathBuf {
-    let home = std::env::var_os("GRAY_HOME")
+    gray_home().join("skills")
+}
+
+fn gray_home() -> PathBuf {
+    std::env::var_os("GRAY_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".gray")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join("skills")
+        .or_else(|| std::env::home_dir().map(|h| h.join(".gray")))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn url_encode(s: &str) -> String {
@@ -254,7 +272,9 @@ fn find_skill_dirs(root: &Path) -> Vec<PathBuf> {
                     stack.push((p, depth + 1));
                 }
             } else if ft.is_file()
-                && e.file_name().to_string_lossy().eq_ignore_ascii_case("skill.md")
+                && e.file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case("skill.md")
                 && std::fs::read_to_string(&p)
                     .ok()
                     .and_then(|t| frontmatter(&t))
@@ -336,7 +356,11 @@ fn search_npm(query: &str) -> Result<Vec<Row>, String> {
 fn search_github(query: &str) -> Result<Vec<Row>, String> {
     let mut rows = Vec::new();
     let mut errs = Vec::new();
-    let q = if query.is_empty() { "agent skills" } else { query };
+    let q = if query.is_empty() {
+        "agent skills"
+    } else {
+        query
+    };
     match run(
         NET_SECS,
         "gh",
@@ -513,7 +537,11 @@ fn tool_search(args: &Value) -> Result<String, String> {
 enum Source {
     Npm(String),
     /// clone_url + optional in-repo subdir + optional skill-name hint (@skill).
-    Git { url: String, subdir: Option<String>, hint: Option<String> },
+    Git {
+        url: String,
+        subdir: Option<String>,
+        hint: Option<String>,
+    },
     /// A single raw SKILL.md.
     Raw(String),
 }
@@ -536,14 +564,16 @@ fn classify(source: &str) -> Result<Source, String> {
     if s.starts_with("http://") || s.starts_with("https://") {
         // github.com/owner/repo[/tree|blob/<branch>/<path>] or a raw file URL.
         let after = s
-            .splitn(2, "github.com/")
-            .nth(1)
-            .map(|t| t.trim_end_matches('/').to_string());
+            .split_once("github.com/")
+            .map(|(_, t)| t.trim_end_matches('/').to_string());
         if let Some(rest) = after.as_deref() {
             let parts: Vec<&str> = rest.split('/').collect();
             if parts.len() >= 2 {
-                let repo_url =
-                    format!("https://github.com/{}/{}.git", parts[0], parts[1].trim_end_matches(".git"));
+                let repo_url = format!(
+                    "https://github.com/{}/{}.git",
+                    parts[0],
+                    parts[1].trim_end_matches(".git")
+                );
                 if parts.len() > 4 && (parts[2] == "blob" || parts[2] == "tree") {
                     let path = parts[4..].join("/");
                     if parts[2] == "blob" {
@@ -632,7 +662,10 @@ fn fetch_npm(staging: &Path, name: &str) -> Result<(), String> {
     if !out.status.success() {
         return Err(format!(
             "tar failed on {name}@{latest}: {}",
-            String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("")
+            String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .next()
+                .unwrap_or("")
         ));
     }
     Ok(())
@@ -651,7 +684,11 @@ fn fetch_git(staging: &Path, url: &str, subdir: Option<&str>) -> Result<(), Stri
     args.push(&dest_s);
     run("40", "git", &args)?; // clones can exceed the 20s GET budget once
     if let Some(sub) = subdir {
-        run(NET_SECS, "git", &["-C", &dest_s, "sparse-checkout", "set", sub])?;
+        run(
+            NET_SECS,
+            "git",
+            &["-C", &dest_s, "sparse-checkout", "set", sub],
+        )?;
     }
     Ok(())
 }
@@ -676,11 +713,7 @@ fn install_staged(staging: &Path, hint: Option<&str>) -> Result<Vec<String>, Str
                 })
                 .cloned()
                 .collect();
-            if narrowed.is_empty() {
-                dirs
-            } else {
-                narrowed
-            }
+            if narrowed.is_empty() { dirs } else { narrowed }
         }
         _ => dirs,
     };
@@ -704,10 +737,7 @@ fn install_staged(staging: &Path, hint: Option<&str>) -> Result<Vec<String>, Str
         let raw_name = fm
             .as_ref()
             .and_then(|(n, _)| n.clone())
-            .or_else(|| {
-                dir.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-            })
+            .or_else(|| dir.file_name().map(|n| n.to_string_lossy().to_string()))
             .unwrap_or_default();
         let name = safe_name(&raw_name);
         if name.is_empty() {
@@ -735,9 +765,7 @@ fn install_staged(staging: &Path, hint: Option<&str>) -> Result<Vec<String>, Str
 }
 
 fn tool_install(args: &Value) -> Result<String, String> {
-    let src = classify(
-        args.get("source").and_then(Value::as_str).unwrap_or(""),
-    )?;
+    let src = classify(args.get("source").and_then(Value::as_str).unwrap_or(""))?;
     let staging = skills_dir().join(format!(".staging-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).map_err(|e| format!("can't stage in ~/.gray/skills: {e}"))?;
@@ -776,65 +804,186 @@ fn tool_install(args: &Value) -> Result<String, String> {
     Ok(out)
 }
 
-fn list_skills(dir: &Path) -> String {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return format!("no skills installed yet ({} doesn't exist)", dir.display());
+fn tool_skill(args: &Value, cwd: &Path) -> Result<String, String> {
+    let name = args
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let skills = catalog::discover(cwd);
+    let state = catalog::State::load();
+    let Some(skill) = skills.iter().find(|s| s.name == name && state.offered(s)) else {
+        return Err(format!("no skill '{name}' available"));
     };
-    let mut rows = Vec::new();
-    for e in entries.flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || !e.path().is_dir() {
-            continue;
-        }
-        let md = e.path().join("SKILL.md");
-        let alt = e.path().join("skill.md");
-        let md = if md.exists() { md } else { alt };
-        match std::fs::read_to_string(&md)
-            .ok()
-            .and_then(|t| frontmatter(&t))
-        {
-            Some((n, d)) => rows.push(format!(
-                "- {} — {}",
-                n.unwrap_or(name),
-                clip(&d.unwrap_or_default(), 110)
-            )),
-            None => rows.push(format!("- {name} (no SKILL.md frontmatter)")),
-        }
+    let text = std::fs::read_to_string(&skill.path)
+        .map_err(|e| format!("failed to read {}: {e}", skill.path.display()))?;
+    catalog::State::record_use(name);
+    let mut out = format!(
+        "Base directory for this skill: {}\n\n{}",
+        skill.dir().display(),
+        catalog::body(&text)
+    );
+    if let Some(a) = args
+        .get("args")
+        .and_then(Value::as_str)
+        .filter(|a| !a.trim().is_empty())
+    {
+        out.push_str(&format!("\n\n**ARGUMENTS:** {a}"));
     }
-    if rows.is_empty() {
-        return format!("no skills installed under {}", dir.display());
-    }
-    rows.sort();
-    format!("{} skill(s) in {}:\n{}", rows.len(), dir.display(), rows.join("\n"))
+    Ok(out)
 }
 
-fn call_tool(name: &str, args: &Value) -> Result<String, String> {
+fn call_tool(name: &str, args: &Value, cwd: &Path) -> Result<String, String> {
     match name {
+        "skill" => tool_skill(args, cwd),
         "skills_search" => tool_search(args),
         "skills_install" => tool_install(args),
-        "skills_list" => Ok(list_skills(&skills_dir())),
         other => Err(format!("unknown tool: {other}")),
     }
 }
 
-/// `/skills …` — bare lists; also `search <q>` / `install <src>` passthroughs.
-fn run_command(argv: &[&str]) -> String {
-    match argv.first().copied() {
-        None | Some("list") | Some("ls") => list_skills(&skills_dir()),
-        Some("search") if argv.len() > 1 => {
-            match tool_search(&json!({ "query": argv[1..].join(" ") })) {
-                Ok(t) | Err(t) => t,
-            }
-        }
-        Some("install") if argv.len() > 1 => {
-            match tool_install(&json!({ "source": argv[1] })) {
-                Ok(t) | Err(t) => t,
-            }
-        }
-        Some(other) => format!(
-            "unknown /skills subcommand: {other} — try /skills, /skills search <q>, /skills install <src>"
-        ),
+fn list_text(skills: &[catalog::Skill], state: &catalog::State) -> String {
+    if skills.is_empty() {
+        return "no skills discovered".to_string();
     }
+    let mut rows = Vec::new();
+    if state.off {
+        rows.push("skills auto-load is off (/skills on to re-enable)".to_string());
+    }
+    for s in skills {
+        let tag = if state.disabled.contains(&s.name) {
+            " [disabled]"
+        } else {
+            ""
+        };
+        rows.push(format!("{} — {}{tag}", s.name, clip(&s.description, 110)));
+    }
+    rows.join("\n")
+}
+
+fn set_off(off: bool) -> String {
+    let mut state = catalog::State::load();
+    state.off = off;
+    if !off {
+        state.disabled.clear();
+    }
+    match state.save() {
+        Ok(()) if off => "✓ skills off — hidden from the model, /skills <name> still runs".into(),
+        Ok(()) => "✓ skills on — all skills back in context".into(),
+        Err(e) => e,
+    }
+}
+
+fn set_disabled(skills: &[catalog::Skill], name: &str, disabled: bool) -> String {
+    if !skills.iter().any(|s| s.name == name) {
+        return format!("no skill '{name}'");
+    }
+    let mut state = catalog::State::load();
+    if disabled {
+        state.disabled.insert(name.to_string());
+    } else {
+        state.disabled.remove(name);
+    }
+    match state.save() {
+        Ok(()) if disabled => {
+            format!("✓ skill '{name}' disabled — hidden from the model, /skills {name} still runs")
+        }
+        Ok(()) => format!("✓ skill '{name}' enabled"),
+        Err(e) => e,
+    }
+}
+
+/// Only skills installed under ~/.gray/skills are ours to delete.
+fn remove_skill(skills: &[catalog::Skill], name: &str, root: &Path) -> String {
+    let Some(skill) = skills.iter().find(|s| s.name == name) else {
+        return format!("no skill '{name}'");
+    };
+    let dir = std::fs::canonicalize(skill.dir()).unwrap_or_else(|_| skill.dir().to_path_buf());
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    if dir == root || !dir.starts_with(&root) {
+        return format!(
+            "'{name}' lives outside {} ({}) — delete it manually",
+            root.display(),
+            skill.path.display()
+        );
+    }
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => format!("✓ removed skill '{name}'"),
+        Err(e) => format!("failed to remove {}: {e}", dir.display()),
+    }
+}
+
+fn run_skill(skills: &[catalog::Skill], name: &str, args: &str) -> Value {
+    let Some(skill) = skills.iter().find(|s| s.name == name) else {
+        let needle = name.to_lowercase();
+        let close: Vec<&str> = skills
+            .iter()
+            .map(|s| s.name.as_str())
+            .filter(|n| n.to_lowercase().contains(&needle))
+            .take(5)
+            .collect();
+        let hint = if close.is_empty() {
+            "/skills lists what's available".to_string()
+        } else {
+            format!("closest matches: {}", close.join(", "))
+        };
+        return json!({ "text": format!("no skill '{name}' — {hint}") });
+    };
+    if let Err(text) = catalog::validate_args(skill, args) {
+        return json!({ "text": text });
+    }
+    let text = match std::fs::read_to_string(&skill.path) {
+        Ok(text) => text,
+        Err(e) => {
+            return json!({ "text": format!("failed to read {}: {e}", skill.path.display()) });
+        }
+    };
+    catalog::State::record_use(name);
+    let mut prompt = format!(
+        "The user explicitly invoked the \"{name}\" skill. Its instructions are binding for the current task: follow them now, starting from the first step, even if you were mid-task — abandon any plan that conflicts with them.\n\nBase directory for this skill: {}\n\n{}",
+        skill.dir().display(),
+        catalog::body(&text)
+    );
+    if !args.is_empty() {
+        prompt.push_str(&format!("\n\n**ARGUMENTS:** {args}"));
+    }
+    json!({ "prompt": prompt })
+}
+
+/// `/skills` lists; `/skills <name> [args]` runs one. A skill sharing a bare
+/// verb's name (`on`, `list`, …) wins that word.
+fn run_command(argv: &[&str], cwd: &Path) -> Value {
+    let skills = catalog::discover(cwd);
+    let text = |t: String| json!({ "text": t });
+    let shadowed = argv.len() == 1 && skills.iter().any(|s| s.name == argv[0]);
+    match argv {
+        [] => text(list_text(&skills, &catalog::State::load())),
+        ["list" | "ls"] if !shadowed => text(list_text(&skills, &catalog::State::load())),
+        ["on" | "enable"] if !shadowed => text(set_off(false)),
+        ["off" | "disable"] if !shadowed => text(set_off(true)),
+        ["enable", name] => text(set_disabled(&skills, name, false)),
+        ["disable", name] => text(set_disabled(&skills, name, true)),
+        ["remove", name] => text(remove_skill(&skills, name, &skills_dir())),
+        ["search", query @ ..] if !query.is_empty() => {
+            match tool_search(&json!({ "query": query.join(" ") })) {
+                Ok(t) | Err(t) => text(t),
+            }
+        }
+        ["install", source] => match tool_install(&json!({ "source": source })) {
+            Ok(t) | Err(t) => text(t),
+        },
+        [name, args @ ..] => run_skill(&skills, name, &args.join(" ")),
+    }
+}
+
+fn request_cwd(params: &Value) -> PathBuf {
+    params["cwd"]
+        .as_str()
+        .or_else(|| params["session"]["cwd"].as_str())
+        .filter(|c| !c.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn handle(req: &Value) -> (Option<Value>, bool) {
@@ -849,7 +998,7 @@ fn handle(req: &Value) -> (Option<Value>, bool) {
         "tool/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("args").cloned().unwrap_or(Value::Null);
-            match call_tool(name, &args) {
+            match call_tool(name, &args, &request_cwd(&params)) {
                 Ok(text) => json!({ "content": text }),
                 Err(text) => json!({ "content": text, "is_error": true }),
             }
@@ -860,7 +1009,12 @@ fn handle(req: &Value) -> (Option<Value>, bool) {
                 .and_then(Value::as_array)
                 .map(|a| a.iter().filter_map(Value::as_str).collect())
                 .unwrap_or_default();
-            json!({ "text": run_command(&argv) })
+            run_command(&argv, &request_cwd(&params))
+        }
+        "prompt/context" => {
+            let skills = catalog::discover(&request_cwd(&params));
+            let block = catalog::listing(&skills, &catalog::State::load(), catalog::char_budget());
+            json!({ "text": block.unwrap_or_default() })
         }
         "plugin/shutdown" => return (Some(json!({ "id": id, "result": {} })), true),
         _ => {
@@ -880,7 +1034,9 @@ fn main() -> std::io::Result<()> {
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
         let line = line?;
-        let Ok(req) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(req) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         let (reply, exit) = handle(&req);
         if let Some(reply) = reply {
             writeln!(stdout, "{reply}")?;
@@ -907,14 +1063,15 @@ mod tests {
     fn manifest_has_tools_and_command() {
         let m = call("plugin/manifest", Value::Null)["result"].clone();
         assert_eq!(m["name"], "skills");
-        assert_eq!(m["commands"], json!(["/skills"]));
+        assert_eq!(m["commands"], json!(["/skills", "/skill"]));
+        assert_eq!(m["hooks"], json!(["prompt/context"]));
         let tools: Vec<&str> = m["tools"]
             .as_array()
             .unwrap()
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(tools, ["skills_search", "skills_install", "skills_list"]);
+        assert_eq!(tools, ["skill", "skills_search", "skills_install"]);
     }
 
     #[test]
@@ -946,14 +1103,8 @@ mod tests {
     #[test]
     fn classify_routes_sources() {
         assert!(matches!(classify("leftpad").unwrap(), Source::Npm(_)));
-        assert!(matches!(
-            classify("@scope/pkg").unwrap(),
-            Source::Npm(_)
-        ));
-        assert!(matches!(
-            classify("npm:pkg").unwrap(),
-            Source::Npm(_)
-        ));
+        assert!(matches!(classify("@scope/pkg").unwrap(), Source::Npm(_)));
+        assert!(matches!(classify("npm:pkg").unwrap(), Source::Npm(_)));
         match classify("owner/repo").unwrap() {
             Source::Git { url, subdir, hint } => {
                 assert_eq!(url, "https://github.com/owner/repo.git");
@@ -1060,19 +1211,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    fn catalog_skill(path: PathBuf) -> catalog::Skill {
+        catalog::Skill {
+            name: "alpha".into(),
+            description: "first".into(),
+            path,
+            user_only: false,
+            args: vec!["dry".into()],
+        }
+    }
+
     #[test]
-    fn list_skills_reports_empty_and_installed() {
+    fn list_shows_rows_and_disabled_tag() {
+        assert_eq!(
+            list_text(&[], &catalog::State::default()),
+            "no skills discovered"
+        );
+        let skills = [catalog_skill(PathBuf::from("/x/SKILL.md"))];
+        let mut state = catalog::State::default();
+        assert!(list_text(&skills, &state).contains("alpha — first"));
+        state.disabled.insert("alpha".into());
+        assert!(list_text(&skills, &state).contains("[disabled]"));
+    }
+
+    #[test]
+    fn run_skill_rejects_bad_args_and_unknown_names() {
+        let skills = [catalog_skill(PathBuf::from("/x/SKILL.md"))];
+        let bad = run_skill(&skills, "alpha", "--wet");
+        assert!(bad["text"].as_str().unwrap().contains("unknown argument"));
+        let miss = run_skill(&skills, "alp", "");
+        assert!(
+            miss["text"]
+                .as_str()
+                .unwrap()
+                .contains("closest matches: alpha")
+        );
+    }
+
+    #[test]
+    fn remove_refuses_skills_outside_the_gray_dir() {
         let root = fixture();
-        assert!(list_skills(&root.join("nope")).contains("no skills"));
-        let sk = root.join("skills/alpha");
-        std::fs::create_dir_all(&sk).unwrap();
-        std::fs::write(
-            sk.join("SKILL.md"),
-            "---\nname: alpha\ndescription: first\n---\n",
-        )
-        .unwrap();
-        let out = list_skills(&root.join("skills"));
-        assert!(out.contains("alpha — first"));
+        let (ours, theirs) = (root.join("skills/alpha"), root.join("elsewhere/alpha"));
+        std::fs::create_dir_all(&ours).unwrap();
+        std::fs::create_dir_all(&theirs).unwrap();
+        let skills_root = root.join("skills");
+        let out = remove_skill(
+            &[catalog_skill(theirs.join("SKILL.md"))],
+            "alpha",
+            &skills_root,
+        );
+        assert!(out.contains("delete it manually") && theirs.exists());
+        let flat = remove_skill(
+            &[catalog_skill(skills_root.join("loose.md"))],
+            "alpha",
+            &skills_root,
+        );
+        assert!(flat.contains("delete it manually") && skills_root.exists());
+        let out = remove_skill(
+            &[catalog_skill(ours.join("SKILL.md"))],
+            "alpha",
+            &skills_root,
+        );
+        assert!(out.contains("removed") && !ours.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1084,9 +1284,19 @@ mod tests {
             "tool/call",
             json!({ "name": "skills_search", "args": { "query": "x", "source": "nope" } }),
         );
-        assert!(r["result"]["content"].as_str().unwrap().contains("unknown source"));
+        assert!(
+            r["result"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("unknown source")
+        );
         let r = call("tool/call", json!({ "name": "nope", "args": {} }));
-        assert!(r["result"]["content"].as_str().unwrap().contains("unknown tool"));
+        assert!(
+            r["result"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("unknown tool")
+        );
     }
 
     #[test]
