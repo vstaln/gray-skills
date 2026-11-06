@@ -1,10 +1,10 @@
 [package]
 name = "gray-skills"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.91"
 license = "MIT"
-description = "skill hub browser/installer — search npm/GitHub/skills-cli for agent skills and install them into ~/.gray/skills"
+description = "skills for gray — discovery, the model-facing listing, the skill tool, /skills, and the hub installer"
 
 [[bin]]
 name = "gray-skills"
