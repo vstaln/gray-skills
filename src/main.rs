@@ -84,7 +84,7 @@ const VERBS: [&str; 8] = [
 
 /// `/skills <name>` completions: gray reads `plugins/skills-completion.json`
 /// and refreshes its popup when the file changes. Rewritten only on change.
-fn publish_completion(skills: &[catalog::Skill]) {
+fn completion_body(skills: &[catalog::Skill]) -> String {
     let mut entries: Vec<Value> = VERBS.iter().map(|v| json!(v)).collect();
     for skill in skills {
         let mut desc: String = skill
@@ -97,7 +97,15 @@ fn publish_completion(skills: &[catalog::Skill]) {
         }
         entries.push(json!({ "arg": skill.name, "description": desc }));
     }
-    let body = json!({ "completion": entries }).to_string();
+    json!({ "completion": entries }).to_string()
+}
+
+fn publish_completion(skills: &[catalog::Skill]) {
+    // Tests drive handle() directly; keep them off the real gray home.
+    if cfg!(test) {
+        return;
+    }
+    let body = completion_body(skills);
     let dir = gray_home().join("plugins");
     let path = dir.join("skills-completion.json");
     if std::fs::read_to_string(&path).is_ok_and(|old| old == body) {
@@ -1063,6 +1071,9 @@ fn handle(req: &Value) -> (Option<Value>, bool) {
 
 fn main() -> std::io::Result<()> {
     if std::env::args().nth(1).as_deref() == Some("manifest") {
+        if let Ok(cwd) = std::env::current_dir() {
+            publish_completion(&catalog::discover(&cwd));
+        }
         println!("{}", manifest());
         return Ok(());
     }
@@ -1088,6 +1099,23 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_lists_verbs_then_described_skills() {
+        let skills = vec![catalog::Skill {
+            name: "demo".into(),
+            description: "word\n ".repeat(40),
+            path: PathBuf::from("/x/demo/SKILL.md"),
+            user_only: false,
+            args: Vec::new(),
+        }];
+        let v: Value = serde_json::from_str(&completion_body(&skills)).unwrap();
+        let c = v["completion"].as_array().unwrap();
+        assert_eq!(c[0], json!("list"));
+        assert_eq!(c[8]["arg"], json!("demo"));
+        let desc = c[8]["description"].as_str().unwrap();
+        assert!(desc.ends_with('…') && desc.chars().count() == 90, "{desc}");
+    }
 
     fn call(method: &str, params: Value) -> Value {
         handle(&json!({ "id": 1, "method": method, "params": params }))
