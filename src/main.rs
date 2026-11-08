@@ -843,6 +843,13 @@ fn tool_install(args: &Value) -> Result<String, String> {
     Ok(out)
 }
 
+/// Expand `${SKILL_DIR}` and `$ARGUMENTS`/`${ARGUMENTS}` in a skill body.
+fn apply_substitutions(body: &str, dir: &Path, args: &str) -> String {
+    body.replace("${SKILL_DIR}", &dir.display().to_string())
+        .replace("${ARGUMENTS}", args)
+        .replace("$ARGUMENTS", args)
+}
+
 fn tool_skill(args: &Value, cwd: &Path) -> Result<String, String> {
     let name = args
         .get("name")
@@ -857,17 +864,14 @@ fn tool_skill(args: &Value, cwd: &Path) -> Result<String, String> {
     let text = std::fs::read_to_string(&skill.path)
         .map_err(|e| format!("failed to read {}: {e}", skill.path.display()))?;
     catalog::State::record_use(name);
+    let arg_text = args.get("args").and_then(Value::as_str).unwrap_or("");
     let mut out = format!(
         "Base directory for this skill: {}\n\n{}",
         skill.dir().display(),
-        catalog::body(&text)
+        apply_substitutions(catalog::body(&text), skill.dir(), arg_text)
     );
-    if let Some(a) = args
-        .get("args")
-        .and_then(Value::as_str)
-        .filter(|a| !a.trim().is_empty())
-    {
-        out.push_str(&format!("\n\n**ARGUMENTS:** {a}"));
+    if !arg_text.trim().is_empty() {
+        out.push_str(&format!("\n\n**ARGUMENTS:** {arg_text}"));
     }
     Ok(out)
 }
@@ -981,7 +985,7 @@ fn run_skill(skills: &[catalog::Skill], name: &str, args: &str) -> Value {
     let mut prompt = format!(
         "The user explicitly invoked the \"{name}\" skill. Its instructions are binding for the current task: follow them now, starting from the first step, even if you were mid-task — abandon any plan that conflicts with them.\n\nBase directory for this skill: {}\n\n{}",
         skill.dir().display(),
-        catalog::body(&text)
+        apply_substitutions(catalog::body(&text), skill.dir(), args)
     );
     if !args.is_empty() {
         prompt.push_str(&format!("\n\n**ARGUMENTS:** {args}"));
@@ -1136,6 +1140,21 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap())
             .collect();
         assert_eq!(tools, ["skill", "skills_search", "skills_install"]);
+    }
+
+    #[test]
+    fn substitutions_expand_skill_dir_and_arguments() {
+        let dir = Path::new("/skills/demo");
+        let out = apply_substitutions(
+            "run ${SKILL_DIR}/scripts/x.sh with $ARGUMENTS and ${ARGUMENTS}",
+            dir,
+            "the args",
+        );
+        assert_eq!(
+            out,
+            "run /skills/demo/scripts/x.sh with the args and the args"
+        );
+        assert_eq!(apply_substitutions("$ARGUMENTS", dir, ""), "");
     }
 
     #[test]
