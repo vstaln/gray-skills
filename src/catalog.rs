@@ -382,7 +382,10 @@ pub fn listing(skills: &[Skill], state: &State, budget: usize) -> Option<String>
         }
         // clip() adds an ellipsis past its limit, so ask for one char less:
         // text + ": " then stays inside this skill's even share of `left`.
-        let text = crate::clip(&skill.description, share.saturating_sub(1).min(MAX_DESCRIPTION_CHARS));
+        let text = crate::clip(
+            &skill.description,
+            share.saturating_sub(1).min(MAX_DESCRIPTION_CHARS),
+        );
         left = left.saturating_sub(text.chars().count() + 2);
         described.insert(skill.name.as_str(), text);
     }
