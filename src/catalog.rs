@@ -1,6 +1,7 @@
 //! Skill discovery and the listing the model sees. Claude Code's scheme: every
 //! skill name always appears; descriptions share a budget of 1% of the context
-//! window and the least-used skills lose theirs first. The `skill` tool loads a
+//! window, split evenly from the most-used down, so a crowded catalog clips
+//! descriptions instead of dropping them. The `skill` tool loads a
 //! body by name, so the listing carries no paths.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -10,6 +11,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 const MAX_DESCRIPTION_CHARS: usize = 1536;
+const MIN_DESCRIPTION_CHARS: usize = 24;
 const DEFAULT_CONTEXT_WINDOW: usize = 200_000;
 const CHARS_PER_TOKEN: usize = 4;
 
@@ -219,18 +221,6 @@ fn find_git_root(start: &Path) -> Option<&Path> {
     start.ancestors().find(|d| d.join(".git").exists())
 }
 
-/// Mirrors gray's project trust: `gray trust` writes this file.
-fn is_trusted(gray_home: &Path, cwd: &Path) -> bool {
-    let base = find_git_root(cwd).unwrap_or(cwd);
-    let root = fs::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
-    read_json(&gray_home.join("trusted_projects.json"))
-        .as_array()
-        .is_some_and(|list| {
-            list.iter()
-                .any(|p| p.as_str().map(Path::new) == Some(&root))
-        })
-}
-
 /// Search order; the first skill to claim a name wins.
 fn roots(cwd: &Path, gray_home: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     let mut out = vec![gray_home.join("skills")];
@@ -249,19 +239,17 @@ fn roots(cwd: &Path, gray_home: &Path, home: Option<&Path>) -> Vec<PathBuf> {
         out.push(home.join(".agents/skills"));
         out.extend(claude_plugin_skill_dirs(home));
     }
-    if is_trusted(gray_home, cwd) {
-        let git_root = find_git_root(cwd);
-        let mut dirs = Vec::new();
-        for dir in cwd.ancestors() {
-            dirs.push(dir);
-            if Some(dir) == git_root {
-                break;
-            }
+    let git_root = find_git_root(cwd);
+    let mut dirs = Vec::new();
+    for dir in cwd.ancestors() {
+        dirs.push(dir);
+        if Some(dir) == git_root {
+            break;
         }
-        for dir in dirs.iter().rev() {
-            for cfg in [".gray", ".claude", ".opencode", ".agents"] {
-                out.push(dir.join(cfg).join("skills"));
-            }
+    }
+    for dir in dirs.iter().rev() {
+        for cfg in [".gray", ".claude", ".opencode", ".agents"] {
+            out.push(dir.join(cfg).join("skills"));
         }
     }
     out
@@ -379,20 +367,22 @@ pub fn listing(skills: &[Skill], state: &State, budget: usize) -> Option<String>
     }
     let uses = |s: &Skill| state.uses.get(&s.name).copied().unwrap_or(0);
     let mut by_use = offered.clone();
-    // Shortest first among equals: alphabetical ties would let a few long
-    // descriptions eat the budget.
+    // Shortest first among equals: what a short description leaves of its
+    // share passes on to the longer ones.
     by_use.sort_by_key(|s| (std::cmp::Reverse(uses(s)), s.description.len()));
 
     let names: usize = offered.iter().map(|s| s.name.chars().count() + 3).sum();
     let mut left = budget.saturating_sub(names);
     let mut described = HashMap::new();
-    for skill in by_use {
-        let text = crate::clip(&skill.description, MAX_DESCRIPTION_CHARS);
-        let cost = text.chars().count() + 2;
-        if cost <= left {
-            left -= cost;
-            described.insert(skill.name.as_str(), text);
+    let count = by_use.len();
+    for (i, skill) in by_use.into_iter().enumerate() {
+        let share = (left / (count - i)).saturating_sub(2);
+        if share < MIN_DESCRIPTION_CHARS {
+            continue;
         }
+        let text = crate::clip(&skill.description, share.min(MAX_DESCRIPTION_CHARS));
+        left = left.saturating_sub(text.chars().count() + 2);
+        described.insert(skill.name.as_str(), text);
     }
 
     let mut out = String::from(
@@ -484,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn project_skills_need_trust_and_first_root_wins_a_name() {
+    fn project_skills_load_and_first_root_wins_a_name() {
         let base = tmp("trust");
         let (gray, proj) = (base.join("gray"), base.join("proj"));
         fs::create_dir_all(proj.join(".git")).unwrap();
@@ -506,26 +496,26 @@ mod tests {
         );
 
         let names = |list: Vec<Skill>| list.into_iter().map(|s| s.name).collect::<Vec<_>>();
-        assert_eq!(names(discover_in(&proj, &gray, None)), ["dup"]);
-
-        fs::write(
-            gray.join("trusted_projects.json"),
-            json!([proj]).to_string(),
-        )
-        .unwrap();
         let found = discover_in(&proj, &gray, None);
         assert_eq!(found[2].description, "from user");
         assert_eq!(names(found), ["commit", "deep", "dup"]);
     }
 
     #[test]
-    fn every_name_survives_and_least_used_lose_descriptions_first() {
-        let skills = [skill("alpha", "aaaaaaaaaa"), skill("beta", "bbbbbbbbbb")];
-        let mut state = State::default();
-        state.uses.insert("beta".into(), 3);
-        let text = listing(&skills, &state, 30).unwrap();
-        assert!(text.contains("- alpha\n"), "{text}");
-        assert!(text.contains("- beta: bbbbbbbbbb\n"), "{text}");
+    fn every_name_survives_and_descriptions_share_the_budget() {
+        let skills = [
+            skill("alpha", &"a".repeat(90)),
+            skill("beta", &"b".repeat(90)),
+        ];
+        let text = listing(&skills, &State::default(), 95).unwrap();
+        assert!(
+            text.contains(&format!("- alpha: {}…\n", "a".repeat(38))),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("- beta: {}…\n", "b".repeat(38))),
+            "{text}"
+        );
 
         let none = listing(&skills, &State::default(), 0).unwrap();
         assert!(none.contains("- alpha\n") && none.contains("- beta\n"));
