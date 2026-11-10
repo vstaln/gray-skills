@@ -380,7 +380,9 @@ pub fn listing(skills: &[Skill], state: &State, budget: usize) -> Option<String>
         if share < MIN_DESCRIPTION_CHARS {
             continue;
         }
-        let text = crate::clip(&skill.description, share.min(MAX_DESCRIPTION_CHARS));
+        // clip() adds an ellipsis past its limit, so ask for one char less:
+        // text + ": " then stays inside this skill's even share of `left`.
+        let text = crate::clip(&skill.description, share.saturating_sub(1).min(MAX_DESCRIPTION_CHARS));
         left = left.saturating_sub(text.chars().count() + 2);
         described.insert(skill.name.as_str(), text);
     }
@@ -509,11 +511,11 @@ mod tests {
         ];
         let text = listing(&skills, &State::default(), 95).unwrap();
         assert!(
-            text.contains(&format!("- alpha: {}…\n", "a".repeat(38))),
+            text.contains(&format!("- alpha: {}…\n", "a".repeat(37))),
             "{text}"
         );
         assert!(
-            text.contains(&format!("- beta: {}…\n", "b".repeat(38))),
+            text.contains(&format!("- beta: {}…\n", "b".repeat(37))),
             "{text}"
         );
 
