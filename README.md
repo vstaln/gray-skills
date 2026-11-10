@@ -15,7 +15,7 @@ Everything gray knows about skills. Bare gray has none; install this to get them
 
 - Discovers skills in `~/.gray/skills`, `~/.claude/skills` (and Claude
   plugins), opencode, `~/.agents/skills`, and the project's `.gray`,
-  `.claude`, `.opencode` and `.agents` dirs once `gray trust` covers it.
+  `.claude`, `.opencode` and `.agents` dirs.
 - Lists them to the model each turn, Claude Code style: every name always
   appears, descriptions share 1% of the context window (at most 1,536
   characters each), and the least-used skills lose theirs first.
