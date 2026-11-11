@@ -1081,6 +1081,10 @@ fn main() -> std::io::Result<()> {
         println!("{}", manifest());
         return Ok(());
     }
+    if std::env::args().nth(1).is_some() || std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        eprintln!("skills has no command line; inside gray use /skills");
+        std::process::exit(2);
+    }
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
