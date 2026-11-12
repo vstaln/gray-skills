@@ -49,7 +49,7 @@ fn manifest() -> Value {
                 }
             },
             {
-                "name": "skills_search",
+                "name": "skills_search", "label": "Skills search", "preview": "{query}",
                 "description": "Search real skill sources for agent skills: npm packages tagged keywords:agent-skills, GitHub repos (topic:agent-skills) and SKILL.md files, and the skills.sh ecosystem CLI. Returns 'name [source] — description' rows; feed a row's name to skills_install.",
                 "parameters": {
                     "type": "object",
@@ -62,7 +62,7 @@ fn manifest() -> Value {
                 }
             },
             {
-                "name": "skills_install",
+                "name": "skills_install", "label": "Installed skill", "preview": "{source}",
                 "description": "Install a skill pack into ~/.gray/skills/<name>/. Source may be an npm package name (or npm:<name>), owner/repo or owner/repo/sub/dir for GitHub (also gh:…, https://github.com/…, owner/repo@skill), or a URL to a raw SKILL.md. Refuses packs with no SKILL.md frontmatter.",
                 "parameters": {
                     "type": "object",
