@@ -74,6 +74,7 @@ fn manifest() -> Value {
             }
         ],
         "commands": ["/skills"],
+        "command_descriptions": {"/skills": "list, search, install and toggle skills"},
         "completion": VERBS,
     })
 }
