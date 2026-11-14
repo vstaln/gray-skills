@@ -73,19 +73,30 @@ fn manifest() -> Value {
                 }
             }
         ],
+        "description": "list, install and toggle agent skills",
         "commands": ["/skills"],
-        "completion": VERBS,
+        "completion": VERBS
+            .iter()
+            .map(|(arg, description)| json!({"arg": arg, "description": description}))
+            .collect::<Vec<_>>(),
     })
 }
 
-const VERBS: [&str; 8] = [
-    "list", "search", "install", "remove", "on", "off", "enable", "disable",
+const VERBS: [(&str, &str); 8] = [
+    ("list", "list installed skills"),
+    ("search", "search skill sources"),
+    ("install", "install a skill pack"),
+    ("remove", "remove an installed skill"),
+    ("on", "enable skills for this session"),
+    ("off", "disable skills for this session"),
+    ("enable", "enable skills, or one named skill"),
+    ("disable", "disable skills, or one named skill"),
 ];
 
 /// `/skills <name>` completions: gray reads `plugins/skills-completion.json`
 /// and refreshes its popup when the file changes. Rewritten only on change.
 fn completion_body(skills: &[catalog::Skill]) -> String {
-    let mut entries: Vec<Value> = VERBS.iter().map(|v| json!(v)).collect();
+    let mut entries: Vec<Value> = VERBS.iter().map(|(v, _)| json!(v)).collect();
     for skill in skills {
         let mut desc: String = skill
             .description
